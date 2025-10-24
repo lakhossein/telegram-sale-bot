@@ -7,30 +7,20 @@ Original file is located at
     https://colab.research.google.com/drive/1JtDPXgmBFM73kfFvTYQxNcXduHRZCMcd
 """
 
-# =============================================
-# 📦 Step 1: نصب کتابخانه مورد نیاز
-# =============================================
-!pip install python-telegram-bot==21.4 python-dotenv
-
-import os
-
-# تنظیم مقادیر ENV فقط همین بخش را قبل از شروع کد قرار دهید و وقتی نیاز بود ویرایش کنید
-os.environ['PLANS'] = 'یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000'
-os.environ['CARD_NUMBER'] = '6219861991747055'
-os.environ['ADMIN_CHAT_ID'] = '2031059511'
-os.environ['BOT_TOKEN'] = '8145134646:AAHZ3fazKnYcGH2tN-XatQzilRfbIk51FAQ'
-
-PLANS_STR = os.environ['PLANS']
-PLANS = {p.split(":")[0]: int(p.split(":")[1]) for p in PLANS_STR.split(",")}
-CARD_NUMBER = os.environ['CARD_NUMBER']
-ADMIN_CHAT_ID = os.environ['ADMIN_CHAT_ID']
-BOT_TOKEN = os.environ['BOT_TOKEN']
-
 import os
 import logging
 import sqlite3
 from datetime import datetime
 import re
+
+# =============================================
+# ⚙️ Step 1: Load Environment Variables
+# =============================================
+PLANS_STR = os.environ.get('PLANS', 'یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000')
+PLANS = {p.split(":")[0]: int(p.split(":")[1]) for p in PLANS_STR.split(",")}
+CARD_NUMBER = os.environ.get('CARD_NUMBER', '')
+ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 
 # =============================================
 # ⚙️ Step 2: وارد کردن کتابخانه‌ها (بدون تغییر)

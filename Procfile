@@ -1,0 +1,1 @@
+worker: python sale_bot.py

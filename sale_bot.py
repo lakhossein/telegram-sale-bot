@@ -18,9 +18,9 @@ import re
 # =============================================
 PLANS_STR = os.environ.get('PLANS', 'یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000')
 PLANS = {p.split(":")[0]: int(p.split(":")[1]) for p in PLANS_STR.split(",")}
-CARD_NUMBER = os.environ.get('CARD_NUMBER', '')
-ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '')
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
+CARD_NUMBER = os.environ.get('CARD_NUMBER', '').strip('\'"')
+ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '').strip('\'"')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '').strip('\'"')
 
 # =============================================
 # ⚙️ Step 2: وارد کردن کتابخانه‌ها (بدون تغییر)

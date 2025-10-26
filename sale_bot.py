@@ -5,6 +5,9 @@ from datetime import datetime
 import re
 import random
 import string
+from dotenv import load_dotenv
+
+load_dotenv()
 
 #ENV
 PLANS_STR = os.environ.get('PLANS', 'یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000')

@@ -1,0 +1,5 @@
+---
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/ekhtesas/public_html/
+    - /bin/rsync -a --exclude=.git --exclude=.cpanel.yml ./ $DEPLOYPATH

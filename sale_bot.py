@@ -231,7 +231,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(text=f"💰 **لیست تعرفه‌ها:**\n\n{plan_list}", reply_markup=back_to_menu_keyboard(), parse_mode='Markdown')
 
     elif data == "support":
-        await query.edit_message_text(text="📞 برای پشتیبانی با ادمین در تماس باشید: @AdminSupport", reply_markup=back_to_menu_keyboard())
+        await query.edit_message_text(text="📞 برای پشتیبانی با ادمین در تماس باشید: @Admiin_gemini", reply_markup=back_to_menu_keyboard())
 
     return ConversationHandler.END
 

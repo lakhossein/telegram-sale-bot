@@ -3,6 +3,8 @@ import logging
 import sqlite3
 from datetime import datetime
 import re
+import random
+import string
 
 #ENV
 PLANS_STR = os.environ.get('PLANS', 'یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000')
@@ -59,6 +61,14 @@ def setup_database():
         FOREIGN KEY (user_id) REFERENCES users (user_id)
     )
     ''')
+    # جدول کدهای تخفیf
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS discount_codes (
+        code TEXT PRIMARY KEY,
+        discount_percent INTEGER,
+        status TEXT DEFAULT 'active' -- active, used
+    )
+    ''')
     conn.commit()
 
     # (جدید) تنظیم شماره شروع سفارش‌ها از 16800
@@ -78,7 +88,9 @@ def setup_database():
 setup_database()
 
 #STATES
-EMAIL, PASSWORD, PLAN, CONFIRM_PAYMENT, UPLOAD_RECEIPT = range(5)
+EMAIL, PASSWORD, PLAN, DISCOUNT_CODE, CONFIRM_PAYMENT, UPLOAD_RECEIPT = range(6)
+GET_DISCOUNT_PERCENT = range(1)
+
 
 #KEYBOARDS
 cancel_keyboard = ReplyKeyboardMarkup(
@@ -163,7 +175,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info("User started new order flow.")
         context.user_data['order'] = {}
         await query.edit_message_text(text="لطفا جیمیل خود را وارد کنید:")
-        await query.message.reply_text("... (مرحله ۱ از ۵)", reply_markup=cancel_keyboard, parse_mode='Markdown')
+        await query.message.reply_text("... (مرحله ۱ از ۶)", reply_markup=cancel_keyboard, parse_mode='Markdown')
         return EMAIL
 
     elif data == "my_orders":
@@ -211,7 +223,7 @@ async def go_back_to_password(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     logger.info("User going back to PASSWORD state.")
     await query.edit_message_text("لطفا رمز عبور خود را مجددا وارد کنید:")
-    await query.message.reply_text("... (مرحله ۲ از ۵)", reply_markup=back_cancel_keyboard)
+    await query.message.reply_text("... (مرحله ۲ از ۶)", reply_markup=back_cancel_keyboard)
     return PASSWORD
 
 async def go_back_to_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -230,29 +242,10 @@ async def go_back_to_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return PLAN
 
 async def go_back_to_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    logger.info("User going back to CONFIRM_PAYMENT state.")
-
-    order_data = context.user_data['order']
-    plan_name = order_data['plan']
-    plan_price = order_data['price']
-
-    payment_info = "اطلاعات سفارش شما:\n\n"
-    payment_info += f"**ایمیل:** {context.user_data['order']['email']}\n"
-    payment_info += f"**پلن:** {plan_name}\n"
-    payment_info += f"**مبلغ قابل پرداخت:** `{plan_price:,}` **تومان**\n\n"
-    payment_info += "لطفا مبلغ را به شماره کارت زیر واریز نمایید:\n"
-    payment_info += f"`{CARD_NUMBER}`\n\n"
-    payment_info += "پس از واریز، روی دکمه «پرداخت کردم» بزنید و رسید را ارسال کنید."
-
-    keyboard = [
-        [InlineKeyboardButton("✅ پرداخت کردم (ارسال رسید)", callback_data="payment_confirmed")],
-        [InlineKeyboardButton("🔙 بازگشت (به انتخاب پلن)", callback_data="back_to_PLAN")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text("بازگشت به مرحله تایید پرداخت...", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text(text=payment_info, reply_markup=reply_markup, parse_mode='Markdown')
+    # This function is not used in the new flow but kept for safety.
+    await show_payment_info(update, context)
     return CONFIRM_PAYMENT
+
 
 #CREATE THE ORDERS
 
@@ -301,25 +294,97 @@ async def select_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     plan_price = int(data[2])
 
     context.user_data['order']['plan'] = plan_name
+    context.user_data['order']['original_price'] = plan_price
     context.user_data['order']['price'] = plan_price
+    context.user_data['order']['discount_code'] = None
     logger.info(f"Step 3: Plan selected: {plan_name} for {plan_price}")
 
+    keyboard = [
+        [InlineKeyboardButton("✅ بله، کد تخفیف دارم", callback_data="has_discount_code")],
+        [InlineKeyboardButton("❌ خیر، ادامه خرید", callback_data="no_discount_code")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        text=f"پلن **{plan_name}** به مبلغ **{plan_price:,} تومان** انتخاب شد.\n\nآیا کد تخفیف دارید؟",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+    return DISCOUNT_CODE
+
+
+async def ask_for_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "has_discount_code":
+        await query.edit_message_text(text="لطفا کد تخفیف خود را وارد کنید:")
+        await query.message.reply_text("... (مرحله ۴ از ۶)", reply_markup=back_cancel_keyboard)
+        return DISCOUNT_CODE
+    else: # no_discount_code
+        return await show_payment_info(update, context)
+
+
+async def get_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_code = update.message.text.strip().upper()
+    conn = sqlite3.connect('sales_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT discount_percent FROM discount_codes WHERE code = ? AND status = 'active'", (user_code,))
+    result = c.fetchone()
+    conn.close()
+
+    if result:
+        discount_percent = result[0]
+        original_price = context.user_data['order']['original_price']
+        discount_amount = (original_price * discount_percent) // 100
+        final_price = original_price - discount_amount
+
+        context.user_data['order']['price'] = final_price
+        context.user_data['order']['discount_code'] = user_code
+        
+        await update.message.reply_text(f"✅ کد تخفیف **{discount_percent}%** با موفقیت اعمال شد.", reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
+        return await show_payment_info(update, context, is_message=True)
+    else:
+        await update.message.reply_text("❌ کد تخفیف نامعتبر یا استفاده شده است.\nمجددا تلاش کنید یا روی «لغو» بزنید.",
+                                      reply_markup=cancel_keyboard)
+        return DISCOUNT_CODE
+
+
+async def show_payment_info(update: Update, context: ContextTypes.DEFAULT_TYPE, is_message: bool = False) -> int:
+    order_data = context.user_data['order']
+    plan_name = order_data['plan']
+    final_price = order_data['price']
+    discount_code = order_data.get('discount_code')
+
     payment_info = "اطلاعات سفارش شما:\n\n"
-    payment_info += f"**ایمیل:** {context.user_data['order']['email']}\n"
+    payment_info += f"**ایمیل:** `{order_data['email']}`\n"
     payment_info += f"**پلن:** {plan_name}\n"
-    payment_info += f"**مبلغ قابل پرداخت:** `{plan_price:,}` **تومان**\n\n"
+    
+    if discount_code:
+        original_price = order_data['original_price']
+        payment_info += f"**قیمت اولیه:** `{original_price:,}` تومان\n"
+        payment_info += f"**کد تخفیف:** `{discount_code}`\n"
+        payment_info += f"**مبلغ نهایی:** **`{final_price:,}` تومان**\n\n"
+    else:
+        payment_info += f"**مبلغ قابل پرداخت:** **`{final_price:,}` تومان**\n\n"
+
     payment_info += "لطفا مبلغ را به شماره کارت زیر واریز نمایید:\n"
     payment_info += f"`{CARD_NUMBER}`\n\n"
     payment_info += "پس از واریز، روی دکمه «پرداخت کردم» بزنید و رسید را ارسال کنید."
 
-    keyboard = [
-        [InlineKeyboardButton("✅ پرداخت کردم (ارسال رسید)", callback_data="payment_confirmed")],
-        [InlineKeyboardButton("🔙 بازگشت (به انتخاب پلن)", callback_data="back_to_PLAN")]
-    ]
+    keyboard = [[InlineKeyboardButton("✅ پرداخت کردم (ارسال رسید)", callback_data="payment_confirmed")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(text=payment_info, reply_markup=reply_markup, parse_mode='Markdown')
+    if is_message:
+         await update.message.reply_text("... (مرحله ۵ از ۶)")
+         await update.message.reply_text(text=payment_info, reply_markup=reply_markup, parse_mode='Markdown')
+    else: 
+        query = update.callback_query
+        # await query.answer() # already answered
+        await query.edit_message_text(text=payment_info, reply_markup=reply_markup, parse_mode='Markdown')
+
     return CONFIRM_PAYMENT
+
 
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -327,7 +392,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     logger.info("Step 4: User confirmed payment, awaiting receipt.")
 
     await query.edit_message_text(text="🖼️ لطفا عکس رسید واریز خود را ارسال کنید.")
-    await query.message.reply_text("... (مرحله ۵ از ۵)", reply_markup=back_cancel_keyboard)
+    await query.message.reply_text("... (مرحله ۶ از ۶)", reply_markup=back_cancel_keyboard)
     return UPLOAD_RECEIPT
 
 async def upload_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -356,6 +421,10 @@ async def upload_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             'pending'
         ))
         new_order_id = c.lastrowid
+        
+        if order_data.get('discount_code'):
+            c.execute("UPDATE discount_codes SET status = 'used' WHERE code = ?", (order_data['discount_code'],))
+            
         conn.commit()
         conn.close()
         logger.info(f"Order {new_order_id} saved successfully.")
@@ -368,8 +437,12 @@ async def upload_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         admin_message = f"🔔 **سفارش جدید** (شماره: {new_order_id})\n\n"
         admin_message += f"**کاربر:** {user.first_name} (آیدی: {user.id})\n"
+        admin_message += f"**ایمیل:** {order_data['email']}\n"
+        admin_message += f"**رمز عبور:** `{order_data['password']}`\n\n"
         admin_message += f"**پلن:** {order_data['plan']}\n"
         admin_message += f"**مبلغ:** {order_data['price']:,} تومان"
+        if order_data.get('discount_code'):
+             admin_message += f"\n**کد تخفیف:** `{order_data['discount_code']}`"
 
         admin_keyboard = [
             [InlineKeyboardButton(f"✅ تایید رسید (شماره: {new_order_id})", callback_data=f"admin_approve_receipt_{new_order_id}")],
@@ -406,6 +479,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "عملیات لغو شد.", reply_markup=ReplyKeyboardRemove()
     )
+    context.user_data.clear()
     await show_menu_message(update, context)
     return ConversationHandler.END
 
@@ -495,15 +569,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                      "لطفا تا پیام بعدی منتظر بمانید.",
                 parse_mode='Markdown'
             )
-
-            new_caption = f"🔔 **سفارش در حال انجام** (شماره: {order_id})\n\n"
-            new_caption += f"**کاربر:** (آیدی: {user_id_to_notify})\n"
-            new_caption += f"**پلن:** {plan}\n"
-            new_caption += f"**مبلغ:** {price:,} تومان\n\n"
-            new_caption += f"**ایمیل:** {email}\n"
-            new_caption += f"**رمز عبور:** `{password}`\n\n"
-            new_caption += "(وضعیت: در حال انجام ⚙️)"
-
+            
+            original_caption = query.message.caption
+            new_caption = f"{original_caption}\n\n-- وضعیت: در حال انجام ⚙️ --"
+            
             new_keyboard = [[InlineKeyboardButton(f"🏁 تایید انجام سفارش (شماره: {order_id})", callback_data=f"admin_approve_final_{order_id}")]]
 
             await query.edit_message_caption(
@@ -561,12 +630,44 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     finally:
         conn.close()
 
+async def new_discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if str(update.effective_chat.id) != ADMIN_CHAT_ID:
+        return ConversationHandler.END
+    await update.message.reply_text("لطفا درصد تخفیف را به صورت یک عدد (مثلا 20) وارد کنید:",
+                                  reply_markup=cancel_keyboard)
+    return GET_DISCOUNT_PERCENT
+
+async def get_discount_percent_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        percent = int(update.message.text)
+        if not 0 < percent <= 100:
+            raise ValueError("Percentage out of range")
+    except ValueError:
+        await update.message.reply_text("❌ ورودی نامعتبر است. لطفا یک عدد بین 1 تا 100 وارد کنید.",
+                                      reply_markup=cancel_keyboard)
+        return GET_DISCOUNT_PERCENT
+
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    
+    try:
+        conn = sqlite3.connect('sales_bot.db')
+        c = conn.cursor()
+        c.execute("INSERT INTO discount_codes (code, discount_percent) VALUES (?, ?)", (code, percent))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"✅ کد تخفیف `{code}` با **{percent}%** تخفیف با موفقیت ساخته شد.",
+                                      reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error creating discount code: {e}")
+        await update.message.reply_text("خطایی در ساخت کد تخفیف رخ داد.")
+
+    return ConversationHandler.END
 
 #RUN THE BOT
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    conv = ConversationHandler(
+    order_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(menu_callback_handler, pattern="^new_order$"),
         ],
@@ -582,12 +683,16 @@ def main():
                 CallbackQueryHandler(go_back_to_password, pattern="^back_to_PASSWORD$"),
                 CallbackQueryHandler(select_plan, pattern="^plan_")
             ],
+            DISCOUNT_CODE: [
+                CallbackQueryHandler(ask_for_discount_code, pattern="^(has|no)_discount_code$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("لغو ❌"), get_discount_code)
+            ],
             CONFIRM_PAYMENT: [
                 CallbackQueryHandler(go_back_to_plan, pattern="^back_to_PLAN$"),
                 CallbackQueryHandler(confirm_payment, pattern="^payment_confirmed$")
             ],
             UPLOAD_RECEIPT: [
-                MessageHandler(filters.Text("بازگشت 🔙"), go_back_to_confirm),
+                MessageHandler(filters.Text("بازگشت 🔙"), show_payment_info),
                 MessageHandler(filters.PHOTO, upload_receipt)
             ],
         },
@@ -595,8 +700,17 @@ def main():
             MessageHandler(filters.Text("لغو ❌"), cancel),
         ],
     )
+    
+    discount_conv = ConversationHandler(
+        entry_points=[CommandHandler("new_discount", new_discount_start)],
+        states={
+            GET_DISCOUNT_PERCENT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("لغو ❌"), get_discount_percent_admin)],
+        },
+        fallbacks=[MessageHandler(filters.Text("لغو ❌"), cancel)],
+    )
 
-    app.add_handler(conv)
+    app.add_handler(order_conv)
+    app.add_handler(discount_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(show_menu, pattern="^show_menu$"))
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern="^(my_orders|plans|support)$"))

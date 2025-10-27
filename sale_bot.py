@@ -1,3 +1,4 @@
+# sale_bot.py
 import os
 import logging
 import sqlite3
@@ -6,10 +7,11 @@ import re
 import random
 import string
 from dotenv import load_dotenv
+from flask import Flask, request, Response
 
 load_dotenv()
 
-#ENV
+# ENV
 PLANS_STR = os.environ.get('PLANS', 'یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000')
 PLANS = {p.split(":")[0]: int(p.split(":")[1]) for p in PLANS_STR.split(",")}
 CARD_NUMBER = os.environ.get('CARD_NUMBER', '').strip('\'"')
@@ -17,11 +19,13 @@ ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '').strip('\'"')
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '').strip('\'"')
 DB_PATH = os.environ.get("DB_PATH", "sales_bot.db")
 
-#IMPORTS
-from telegram import __version__ as TG_VER
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN در فایل .env تنظیم نشده است!")
+
+# IMPORTS telegram
 from telegram import (ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton)
 from telegram.ext import (
-    Application, ApplicationBuilder,
+    Application,
     CommandHandler, ConversationHandler,
     ContextTypes,
     MessageHandler,
@@ -29,18 +33,24 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 
-#LOGGING
+# LOGGING -> file + stream
+LOG_FILE = os.path.join(os.path.dirname(__file__), "bot.log")
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler()
+    ]
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-#DATABASE
+# DATABASE
 def setup_database():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # جدول کاربران
+    # users table
     c.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -50,7 +60,7 @@ def setup_database():
         last_name TEXT
     )
     ''')
-    # جدول سفارش‌ها
+    # orders table
     c.execute('''
     CREATE TABLE IF NOT EXISTS orders (
         order_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,22 +70,22 @@ def setup_database():
         plan TEXT,
         price INTEGER,
         receipt_photo BLOB,
-        status TEXT DEFAULT 'pending', -- pending, processing, approved, rejected
+        status TEXT DEFAULT 'pending',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (user_id)
     )
     ''')
-    # جدول کدهای تخفیf
+    # discount codes
     c.execute('''
     CREATE TABLE IF NOT EXISTS discount_codes (
         code TEXT PRIMARY KEY,
         discount_percent INTEGER,
-        status TEXT DEFAULT 'active' -- active, used
+        status TEXT DEFAULT 'active'
     )
     ''')
     conn.commit()
 
-    # (جدید) تنظیم شماره شروع سفارش‌ها از 16800
+    # set starting order id to 16800 (if empty)
     c.execute("SELECT count(order_id) FROM orders")
     count = c.fetchone()[0]
     if count == 0:
@@ -91,12 +101,11 @@ def setup_database():
 
 setup_database()
 
-#STATES
+# STATES
 EMAIL, PASSWORD, PLAN, DISCOUNT_CODE, CONFIRM_PAYMENT, UPLOAD_RECEIPT = range(6)
 GET_DISCOUNT_PERCENT = range(1)
 
-
-#KEYBOARDS
+# KEYBOARDS
 cancel_keyboard = ReplyKeyboardMarkup(
     [["لغو ❌"]], resize_keyboard=True, one_time_keyboard=True
 )
@@ -104,7 +113,14 @@ back_cancel_keyboard = ReplyKeyboardMarkup(
     [["بازگشت 🔙"], ["لغو ❌"]], resize_keyboard=True, one_time_keyboard=True
 )
 
-#START THE ROBOT
+# FLASK app (exported for passenger_wsgi.py)
+flask_app = Flask(__name__)
+
+# Create global Telegram application
+application = Application.builder().token(BOT_TOKEN).build()
+
+# === Handlers (همان کد قبلی، بدون تغییر منطقی) ===
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id
@@ -131,7 +147,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-#SHOW MENU
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -156,7 +171,6 @@ async def show_menu_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text=menu_text, reply_markup=reply_markup)
-
 
 def translate_status(status):
     if status == 'pending':
@@ -215,7 +229,6 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     return ConversationHandler.END
 
-#BACK TO MENU
 async def go_back_to_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     logger.info("User going back to EMAIL state.")
     await update.message.reply_text("لطفا جیمیل خود را مجددا وارد کنید:",
@@ -246,12 +259,8 @@ async def go_back_to_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return PLAN
 
 async def go_back_to_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # This function is not used in the new flow but kept for safety.
     await show_payment_info(update, context)
     return CONFIRM_PAYMENT
-
-
-#CREATE THE ORDERS
 
 EMAIL_REGEX = r"^[a-zA-Z0-9_.+-]+@gmail\.com$"
 
@@ -316,7 +325,6 @@ async def select_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     )
     return DISCOUNT_CODE
 
-
 async def ask_for_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -325,9 +333,8 @@ async def ask_for_discount_code(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(text="لطفا کد تخفیف خود را وارد کنید:")
         await query.message.reply_text("... (مرحله ۴ از ۶)", reply_markup=back_cancel_keyboard)
         return DISCOUNT_CODE
-    else: # no_discount_code
+    else:
         return await show_payment_info(update, context)
-
 
 async def get_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_code = update.message.text.strip().upper()
@@ -345,14 +352,13 @@ async def get_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         context.user_data['order']['price'] = final_price
         context.user_data['order']['discount_code'] = user_code
-        
+
         await update.message.reply_text(f"✅ کد تخفیف **{discount_percent}%** با موفقیت اعمال شد.", reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
         return await show_payment_info(update, context, is_message=True)
     else:
         await update.message.reply_text("❌ کد تخفیف نامعتبر یا استفاده شده است.\nمجددا تلاش کنید یا روی «لغو» بزنید.",
                                       reply_markup=cancel_keyboard)
         return DISCOUNT_CODE
-
 
 async def show_payment_info(update: Update, context: ContextTypes.DEFAULT_TYPE, is_message: bool = False) -> int:
     order_data = context.user_data['order']
@@ -363,7 +369,7 @@ async def show_payment_info(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     payment_info = "اطلاعات سفارش شما:\n\n"
     payment_info += f"**ایمیل:** `{order_data['email']}`\n"
     payment_info += f"**پلن:** {plan_name}\n"
-    
+
     if discount_code:
         original_price = order_data['original_price']
         payment_info += f"**قیمت اولیه:** `{original_price:,}` تومان\n"
@@ -382,13 +388,11 @@ async def show_payment_info(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if is_message:
          await update.message.reply_text("... (مرحله ۵ از ۶)")
          await update.message.reply_text(text=payment_info, reply_markup=reply_markup, parse_mode='Markdown')
-    else: 
+    else:
         query = update.callback_query
-        # await query.answer() # already answered
         await query.edit_message_text(text=payment_info, reply_markup=reply_markup, parse_mode='Markdown')
 
     return CONFIRM_PAYMENT
-
 
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -425,10 +429,10 @@ async def upload_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             'pending'
         ))
         new_order_id = c.lastrowid
-        
+
         if order_data.get('discount_code'):
             c.execute("UPDATE discount_codes SET status = 'used' WHERE code = ?", (order_data['discount_code'],))
-            
+
         conn.commit()
         conn.close()
         logger.info(f"Order {new_order_id} saved successfully.")
@@ -469,8 +473,7 @@ async def upload_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.clear()
     return ConversationHandler.END
 
-
-#MENU KEYBOARDS
+# MENU KEYBOARDS
 def back_to_menu_keyboard(inline=True):
     if inline:
         keyboard = [[InlineKeyboardButton("🔙 بازگشت به منو اصلی", callback_data="show_menu")]]
@@ -495,7 +498,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await show_menu(update, context)
     return ConversationHandler.END
 
-#ADMIN FEATURES
+# ADMIN FEATURES
 async def list_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID: return
     conn = sqlite3.connect(DB_PATH)
@@ -573,12 +576,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                      "لطفا تا پیام بعدی منتظر بمانید.",
                 parse_mode='Markdown'
             )
-            
-            original_caption = query.message.caption
-            new_caption = f"{original_caption}\n\n-- وضعیت: در حال انجام ⚙️ --"
-            
-            new_keyboard = [[InlineKeyboardButton(f"🏁 تایید انجام سفارش (شماره: {order_id})", callback_data=f"admin_approve_final_{order_id}")]]
 
+            original_caption = query.message.caption or ""
+            new_caption = f"{original_caption}\n\n-- وضعیت: در حال انجام ⚙️ --"
+
+            new_keyboard = [[InlineKeyboardButton(f"🏁 تایید انجام سفارش (شماره: {order_id})", callback_data=f"admin_approve_final_{order_id}")]]
             await query.edit_message_caption(
                 caption=new_caption,
                 reply_markup=InlineKeyboardMarkup(new_keyboard),
@@ -600,7 +602,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 parse_mode='Markdown'
             )
 
-            original_caption = query.message.caption
+            original_caption = query.message.caption or ""
             await query.edit_message_caption(
                 caption=f"{original_caption}\n\n-- ✅ سفارش با موفقیت انجام شد --",
                 parse_mode='Markdown'
@@ -622,7 +624,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 parse_mode='Markdown'
             )
 
-            original_caption = query.message.caption
+            original_caption = query.message.caption or ""
             await query.edit_message_caption(
                 caption=f"{original_caption}\n\n-- ❌ سفارش رد شد --",
                 parse_mode='Markdown'
@@ -652,7 +654,7 @@ async def get_discount_percent_admin(update: Update, context: ContextTypes.DEFAU
         return GET_DISCOUNT_PERCENT
 
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    
+
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -667,10 +669,8 @@ async def get_discount_percent_admin(update: Update, context: ContextTypes.DEFAU
 
     return ConversationHandler.END
 
-#RUN THE BOT
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
+# === Register handlers into global application ===
+def register_handlers(app):
     order_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(menu_callback_handler, pattern="^new_order$"),
@@ -704,7 +704,7 @@ def main():
             MessageHandler(filters.Text("لغو ❌"), cancel),
         ],
     )
-    
+
     discount_conv = ConversationHandler(
         entry_points=[CommandHandler("new_discount", new_discount_start)],
         states={
@@ -726,9 +726,55 @@ def main():
     app.add_handler(CommandHandler("orders_processing", list_processing))
     app.add_handler(CommandHandler("orders_approved", list_approved))
 
-    print("✅ Bot started and polling...")
-    app.run_polling()
+register_handlers(application)
 
-#RUN
+# === Webhook endpoint for Telegram ===
+@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        application.update_queue.put(update)
+        return "OK", 200
+    except Exception as e:
+        logger.exception("Error handling webhook update")
+        return Response("Error", status=500)
+
+# === Index and logs pages ===
+@flask_app.route("/")
+def index():
+    return "ربات تلگرام در حال اجراست ✅", 200
+
+@flask_app.route("/logs")
+def show_logs():
+    try:
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                content = f.read()[-20000:]
+            content = content.replace("<", "&lt;").replace(">", "&gt;")
+            return f"<pre>{content}</pre>", 200
+        else:
+            return "هنوز لاگی وجود ندارد.", 200
+    except Exception as e:
+        logger.exception("Error reading log file")
+        return Response("Error reading logs", status=500)
+
+# === Run webhook when executed directly (dev) or attempt when imported (Passenger) ===
 if __name__ == "__main__":
-    main()
+    logger.info("Running locally (dev) with run_webhook()")
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        url_path=BOT_TOKEN,
+        webhook_url=f"https://ekhtesasiyek.ir/{BOT_TOKEN}"
+    )
+else:
+    logger.info("Module imported (likely Passenger). Attempting to start run_webhook bound to localhost.")
+    try:
+        application.run_webhook(
+            listen="127.0.0.1",
+            port=5000,
+            url_path=BOT_TOKEN,
+            webhook_url=f"https://ekhtesasiyek.ir/{BOT_TOKEN}"
+        )
+    except Exception:
+        logger.exception("run_webhook failed; this may be OK under Passenger where requests are proxied.")

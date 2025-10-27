@@ -15,7 +15,7 @@ PLANS = {p.split(":")[0]: int(p.split(":")[1]) for p in PLANS_STR.split(",")}
 CARD_NUMBER = "6219861991747055"
 ADMIN_CHAT_ID = "7575064458"
 BOT_TOKEN = "8145134646:AAHZ3fazKnYcGH2tN-XatQzilRfbIk51FAQ"
-DB_PATH = "/home/ekhtesas/sales_bot.db"
+DB_PATH = "sales_bot.db"
 
 # IMPORTS telegram
 from telegram import (ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton)

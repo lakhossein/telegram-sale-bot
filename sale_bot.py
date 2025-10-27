@@ -12,6 +12,7 @@ PLANS = {p.split(":")[0]: int(p.split(":")[1]) for p in PLANS_STR.split(",")}
 CARD_NUMBER = os.environ.get('CARD_NUMBER', '').strip('\'"')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '').strip('\'"')
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '').strip('\'"')
+DB_PATH = os.environ.get("DB_PATH", "sales_bot.db")
 
 #IMPORTS
 from telegram import __version__ as TG_VER
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 #DATABASE
 def setup_database():
-    conn = sqlite3.connect('sales_bot.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     # جدول کاربران
     c.execute('''
@@ -105,7 +106,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id
     try:
-        conn = sqlite3.connect('sales_bot.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
             INSERT INTO users (user_id, chat_id, username, first_name, last_name)
@@ -179,7 +180,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return EMAIL
 
     elif data == "my_orders":
-        conn = sqlite3.connect('sales_bot.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT order_id, plan, status, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 10", (user_id,))
         orders = c.fetchall()
@@ -327,7 +328,7 @@ async def ask_for_discount_code(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def get_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_code = update.message.text.strip().upper()
-    conn = sqlite3.connect('sales_bot.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT discount_percent FROM discount_codes WHERE code = ? AND status = 'active'", (user_code,))
     result = c.fetchone()
@@ -406,7 +407,7 @@ async def upload_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Step 5: Receipt received. Saving order for user {user.id}.")
 
     try:
-        conn = sqlite3.connect('sales_bot.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
             INSERT INTO orders (user_id, email, password, plan, price, receipt_photo, status)
@@ -494,7 +495,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 #ADMIN FEATURES
 async def list_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID: return
-    conn = sqlite3.connect('sales_bot.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT order_id, user_id, plan FROM orders WHERE status = 'pending'")
     orders = c.fetchall()
@@ -509,7 +510,7 @@ async def list_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def list_processing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID: return
-    conn = sqlite3.connect('sales_bot.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT order_id, user_id, email, password FROM orders WHERE status = 'processing'")
     orders = c.fetchall()
@@ -524,7 +525,7 @@ async def list_processing(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def list_approved(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID: return
-    conn = sqlite3.connect('sales_bot.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT order_id, user_id, plan FROM orders WHERE status = 'approved' ORDER BY order_id DESC LIMIT 10")
     orders = c.fetchall()
@@ -545,7 +546,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id_to_notify = None
     order_id = int(data.split("_")[-1])
 
-    conn = sqlite3.connect('sales_bot.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
     try:
@@ -650,7 +651,7 @@ async def get_discount_percent_admin(update: Update, context: ContextTypes.DEFAU
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
     
     try:
-        conn = sqlite3.connect('sales_bot.db')
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT INTO discount_codes (code, discount_percent) VALUES (?, ?)", (code, percent))
         conn.commit()
@@ -725,6 +726,6 @@ def main():
     print("✅ Bot started and polling...")
     app.run_polling()
 
-#RUN IN COLAB
+#RUN
 if __name__ == "__main__":
     main()

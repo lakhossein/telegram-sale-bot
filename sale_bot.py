@@ -2,25 +2,20 @@
 import os
 import logging
 import sqlite3
+import asyncio
 from datetime import datetime
 import re
 import random
 import string
-from dotenv import load_dotenv
 from flask import Flask, request, Response
 
-load_dotenv()
-
 # ENV
-PLANS_STR = os.environ.get('PLANS', 'یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000')
+PLANS_STR = "یک ماهه:199000,سه ماهه:490000,شش ماهه:870000,یک ساله:1470000"
 PLANS = {p.split(":")[0]: int(p.split(":")[1]) for p in PLANS_STR.split(",")}
-CARD_NUMBER = os.environ.get('CARD_NUMBER', '').strip('\'"')
-ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '').strip('\'"')
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '').strip('\'"')
-DB_PATH = os.environ.get("DB_PATH", "sales_bot.db")
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN در فایل .env تنظیم نشده است!")
+CARD_NUMBER = "6219861991747055"
+ADMIN_CHAT_ID = "7575064458"
+BOT_TOKEN = "8145134646:AAHZ3fazKnYcGH2tN-XatQzilRfbIk51FAQ"
+DB_PATH = "/home/ekhtesas/sales_bot.db"
 
 # IMPORTS telegram
 from telegram import (ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton)
@@ -730,10 +725,10 @@ register_handlers(application)
 
 # === Webhook endpoint for Telegram ===
 @flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
+async def webhook()
     try:
         update = Update.de_json(request.get_json(force=True), application.bot)
-        application.update_queue.put(update)
+        await application.process_update(update)
         return "OK", 200
     except Exception as e:
         logger.exception("Error handling webhook update")
@@ -757,24 +752,3 @@ def show_logs():
     except Exception as e:
         logger.exception("Error reading log file")
         return Response("Error reading logs", status=500)
-
-# === Run webhook when executed directly (dev) or attempt when imported (Passenger) ===
-if __name__ == "__main__":
-    logger.info("Running locally (dev) with run_webhook()")
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        url_path=BOT_TOKEN,
-        webhook_url=f"https://ekhtesasiyek.ir/{BOT_TOKEN}"
-    )
-else:
-    logger.info("Module imported (likely Passenger). Attempting to start run_webhook bound to localhost.")
-    try:
-        application.run_webhook(
-            listen="127.0.0.1",
-            port=5000,
-            url_path=BOT_TOKEN,
-            webhook_url=f"https://ekhtesasiyek.ir/{BOT_TOKEN}"
-        )
-    except Exception:
-        logger.exception("run_webhook failed; this may be OK under Passenger where requests are proxied.")

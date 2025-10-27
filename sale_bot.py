@@ -725,7 +725,7 @@ register_handlers(application)
 
 # === Webhook endpoint for Telegram ===
 @flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
-async def webhook()
+async def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), application.bot)
         await application.process_update(update)

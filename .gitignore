@@ -20,11 +20,6 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
-venv/
-ENV/
-env/
-
 # Database
 *.db
 *.sqlite
@@ -43,7 +38,3 @@ env/
 # OS
 .DS_Store
 Thumbs.db
-
-# Environment variables (already in Replit Secrets)
-.env
-.env.local

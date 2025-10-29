@@ -2,6 +2,7 @@
 import os
 import logging
 import sqlite3
+import aiosqlite
 import asyncio
 from datetime import datetime
 import re
@@ -28,7 +29,7 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 
-# LOGGING -> file + stream
+# LOGGING
 LOG_FILE = os.path.join(os.path.dirname(__file__), "bot.log")
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -41,60 +42,66 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# DATABASE
-def setup_database():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    # users table
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        chat_id INTEGER UNIQUE,
-        username TEXT,
-        first_name TEXT,
-        last_name TEXT
-    )
-    ''')
-    # orders table
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS orders (
-        order_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        email TEXT,
-        password TEXT,
-        plan TEXT,
-        price INTEGER,
-        receipt_photo BLOB,
-        status TEXT DEFAULT 'pending',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )
-    ''')
-    # discount codes
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS discount_codes (
-        code TEXT PRIMARY KEY,
-        discount_percent INTEGER,
-        status TEXT DEFAULT 'active'
-    )
-    ''')
-    conn.commit()
+# DATABASE (Async)
+async def setup_database():
+    async with aiosqlite.connect(DB_PATH) as conn:
+        c = await conn.cursor()
+        # users table
+        await c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER UNIQUE,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT
+        )
+        ''')
+        # orders table
+        await c.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            email TEXT,
+            password TEXT,
+            plan TEXT,
+            price INTEGER,
+            receipt_photo BLOB,
+            status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        ''')
+        # discount codes
+        await c.execute('''
+        CREATE TABLE IF NOT EXISTS discount_codes (
+            code TEXT PRIMARY KEY,
+            discount_percent INTEGER,
+            status TEXT DEFAULT 'active'
+        )
+        ''')
+        await conn.commit()
 
-    # set starting order id to 16800 (if empty)
-    c.execute("SELECT count(order_id) FROM orders")
-    count = c.fetchone()[0]
-    if count == 0:
-        try:
-            c.execute("INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('orders', 16799)")
-            conn.commit()
-            logger.info("Starting order ID set to 16800.")
-        except Exception as e:
-            logger.warning(f"Could not set auto-increment sequence: {e}")
+        # set starting order id to 16800 (if empty)
+        await c.execute("SELECT count(order_id) FROM orders")
+        count_row = await c.fetchone()
+        count = count_row[0] if count_row else 0
+        if count == 0:
+            try:
+                # For aiosqlite, we manually manage the sequence for new tables.
+                # This ensures the first ID is 16800
+                await c.execute("INSERT INTO orders (order_id, user_id, email, password, plan, price, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (16799, 0, 'init', 'init', 'init', 0, 'deleted'))
+                await c.execute("DELETE FROM orders WHERE order_id = 16799")
+                await conn.commit()
+                logger.info("Starting order ID set to 16800.")
+            except Exception as e:
+                logger.warning(f"Could not set auto-increment sequence: {e}")
 
-    conn.close()
-    print("✅ Database setup complete (orders starting from 16800).")
+    print("Async Database setup complete (orders starting from 16800).")
 
-setup_database()
+# Run setup once at the start
+asyncio.run(setup_database())
+
 
 # STATES
 EMAIL, PASSWORD, PLAN, DISCOUNT_CODE, CONFIRM_PAYMENT, UPLOAD_RECEIPT = range(6)
@@ -114,24 +121,21 @@ flask_app = Flask(__name__)
 # Create global Telegram application
 application = Application.builder().token(BOT_TOKEN).build()
 
-# === Handlers (همان کد قبلی، بدون تغییر منطقی) ===
-
+# === Handlers (Async/Await for DB operations) ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO users (user_id, chat_id, username, first_name, last_name)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                username=excluded.username,
-                first_name=excluded.first_name,
-                last_name=excluded.last_name
-        ''', (user.id, chat_id, user.username, user.first_name, user.last_name))
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await conn.execute('''
+                INSERT INTO users (user_id, chat_id, username, first_name, last_name)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    username=excluded.username,
+                    first_name=excluded.first_name,
+                    last_name=excluded.last_name
+            ''', (user.id, chat_id, user.username, user.first_name, user.last_name))
+            await conn.commit()
         logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
     except Exception as e:
         logger.error(f"Error saving user {user.id}: {e}")
@@ -192,11 +196,9 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return EMAIL
 
     elif data == "my_orders":
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT order_id, plan, status, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 10", (user_id,))
-        orders = c.fetchall()
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as conn:
+            cursor = await conn.execute("SELECT order_id, plan, status, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 10", (user_id,))
+            orders = await cursor.fetchall()
 
         if not orders:
             await query.edit_message_text(text="شما هنوز سفارشی ثبت نکرده‌اید.", reply_markup=back_to_menu_keyboard())
@@ -205,7 +207,11 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         message = "🧾 **سفارش‌های شما:**\n\n"
         for order in orders:
             order_id, plan, status, created_at = order
-            date_time_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S.%f' if '.' in created_at else '%Y-%m-%d %H:%M:%S')
+            # Handling potential format differences in created_at
+            try:
+                date_time_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S.%f')
+            except ValueError:
+                date_time_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
             f_date = date_time_obj.strftime('%Y/%m/%d')
             f_status = translate_status(status)
             message += f"🔹 **سفارش شماره {order_id}**\n"
@@ -333,11 +339,9 @@ async def ask_for_discount_code(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def get_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_code = update.message.text.strip().upper()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT discount_percent FROM discount_codes WHERE code = ? AND status = 'active'", (user_code,))
-    result = c.fetchone()
-    conn.close()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute("SELECT discount_percent FROM discount_codes WHERE code = ? AND status = 'active'", (user_code,))
+        result = await cursor.fetchone()
 
     if result:
         discount_percent = result[0]
@@ -409,27 +413,27 @@ async def upload_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Step 5: Receipt received. Saving order for user {user.id}.")
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO orders (user_id, email, password, plan, price, receipt_photo, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            user.id,
-            order_data['email'],
-            order_data['password'],
-            order_data['plan'],
-            order_data['price'],
-            sqlite3.Binary(photo_bytes_for_db),
-            'pending'
-        ))
-        new_order_id = c.lastrowid
+        async with aiosqlite.connect(DB_PATH) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute('''
+                INSERT INTO orders (user_id, email, password, plan, price, receipt_photo, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user.id,
+                order_data['email'],
+                order_data['password'],
+                order_data['plan'],
+                order_data['price'],
+                sqlite3.Binary(photo_bytes_for_db),
+                'pending'
+            ))
+            new_order_id = cursor.lastrowid
 
-        if order_data.get('discount_code'):
-            c.execute("UPDATE discount_codes SET status = 'used' WHERE code = ?", (order_data['discount_code'],))
+            if order_data.get('discount_code'):
+                await conn.execute("UPDATE discount_codes SET status = 'used' WHERE code = ?", (order_data['discount_code'],))
 
-        conn.commit()
-        conn.close()
+            await conn.commit()
+            
         logger.info(f"Order {new_order_id} saved successfully.")
 
         await update.message.reply_text(
@@ -493,14 +497,12 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await show_menu(update, context)
     return ConversationHandler.END
 
-# ADMIN FEATURES
+# ADMIN FEATURES (Async)
 async def list_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID: return
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT order_id, user_id, plan FROM orders WHERE status = 'pending'")
-    orders = c.fetchall()
-    conn.close()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute("SELECT order_id, user_id, plan FROM orders WHERE status = 'pending'")
+        orders = await cursor.fetchall()
     if not orders:
         await update.message.reply_text("هیچ سفارش در انتظار تایید رسیدی وجود ندارد.")
         return
@@ -511,11 +513,9 @@ async def list_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def list_processing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID: return
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT order_id, user_id, email, password FROM orders WHERE status = 'processing'")
-    orders = c.fetchall()
-    conn.close()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute("SELECT order_id, user_id, email, password FROM orders WHERE status = 'processing'")
+        orders = await cursor.fetchall()
     if not orders:
         await update.message.reply_text("هیچ سفارش در حال انجام وجود ندارد.")
         return
@@ -526,11 +526,9 @@ async def list_processing(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def list_approved(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID: return
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT order_id, user_id, plan FROM orders WHERE status = 'approved' ORDER BY order_id DESC LIMIT 10")
-    orders = c.fetchall()
-    conn.close()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute("SELECT order_id, user_id, plan FROM orders WHERE status = 'approved' ORDER BY order_id DESC LIMIT 10")
+        orders = await cursor.fetchall()
     if not orders:
         await update.message.reply_text("هنوز سفارش تایید شده‌ای وجود ندارد.")
         return
@@ -547,89 +545,87 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id_to_notify = None
     order_id = int(data.split("_")[-1])
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
     try:
-        if data.startswith("admin_approve_receipt_"):
-            logger.info(f"Admin: Approving receipt for order {order_id}")
-            c.execute("SELECT user_id, email, password, plan, price FROM orders WHERE order_id = ?", (order_id,))
-            result = c.fetchone()
-            if not result:
-                await query.edit_message_caption(caption=f"خطا: سفارش {order_id} یافت نشد.")
-                return
+        async with aiosqlite.connect(DB_PATH) as conn:
+            if data.startswith("admin_approve_receipt_"):
+                logger.info(f"Admin: Approving receipt for order {order_id}")
+                cursor = await conn.execute("SELECT user_id, email, password, plan, price FROM orders WHERE order_id = ?", (order_id,))
+                result = await cursor.fetchone()
+                if not result:
+                    await query.edit_message_caption(caption=f"خطا: سفارش {order_id} یافت نشد.")
+                    return
 
-            user_id_to_notify, email, password, plan, price = result
+                user_id_to_notify, email, password, plan, price = result
 
-            c.execute("UPDATE orders SET status = 'processing' WHERE order_id = ?", (order_id,))
-            conn.commit()
+                await conn.execute("UPDATE orders SET status = 'processing' WHERE order_id = ?", (order_id,))
+                await conn.commit()
 
-            await context.bot.send_message(
-                chat_id=user_id_to_notify,
-                text=f"🧾 رسید شما برای سفارش شماره **{order_id}** تایید شد.\n\n"
-                     f"سفارش شما **در حال انجام است...** ⚙️\n"
-                     "لطفا تا پیام بعدی منتظر بمانید.",
-                parse_mode='Markdown'
-            )
+                await context.bot.send_message(
+                    chat_id=user_id_to_notify,
+                    text=f"🧾 رسید شما برای سفارش شماره **{order_id}** تایید شد.\n\n"
+                         f"سفارش شما **در حال انجام است...** ⚙️\n"
+                         "لطفا تا پیام بعدی منتظر بمانید.",
+                    parse_mode='Markdown'
+                )
 
-            original_caption = query.message.caption or ""
-            new_caption = f"{original_caption}\n\n-- وضعیت: در حال انجام ⚙️ --"
+                original_caption = query.message.caption or ""
+                new_caption = f"{original_caption}\n\n-- وضعیت: در حال انجام ⚙️ --"
 
-            new_keyboard = [[InlineKeyboardButton(f"🏁 تایید انجام سفارش (شماره: {order_id})", callback_data=f"admin_approve_final_{order_id}")]]
-            await query.edit_message_caption(
-                caption=new_caption,
-                reply_markup=InlineKeyboardMarkup(new_keyboard),
-                parse_mode='Markdown'
-            )
+                new_keyboard = [[InlineKeyboardButton(f"🏁 تایید انجام سفارش (شماره: {order_id})", callback_data=f"admin_approve_final_{order_id}")]]
+                await query.edit_message_caption(
+                    caption=new_caption,
+                    reply_markup=InlineKeyboardMarkup(new_keyboard),
+                    parse_mode='Markdown'
+                )
 
-        elif data.startswith("admin_approve_final_"):
-            logger.info(f"Admin: Finalizing order {order_id}")
+            elif data.startswith("admin_approve_final_"):
+                logger.info(f"Admin: Finalizing order {order_id}")
 
-            c.execute("UPDATE orders SET status = 'approved' WHERE order_id = ?", (order_id,))
-            conn.commit()
+                await conn.execute("UPDATE orders SET status = 'approved' WHERE order_id = ?", (order_id,))
+                await conn.commit()
 
-            c.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
-            user_id_to_notify = c.fetchone()[0]
+                cursor = await conn.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
+                user_id_row = await cursor.fetchone()
+                if user_id_row:
+                    user_id_to_notify = user_id_row[0]
+                    await context.bot.send_message(
+                        chat_id=user_id_to_notify,
+                        text=f"✅ سفارش شما (شماره: **{order_id}**) با موفقیت انجام شد.\n\n از خرید شما متشکریم! 🙏",
+                        parse_mode='Markdown'
+                    )
 
-            await context.bot.send_message(
-                chat_id=user_id_to_notify,
-                text=f"✅ سفارش شما (شماره: **{order_id}**) با موفقیت انجام شد.\n\n از خرید شما متشکریم! 🙏",
-                parse_mode='Markdown'
-            )
+                original_caption = query.message.caption or ""
+                await query.edit_message_caption(
+                    caption=f"{original_caption}\n\n-- ✅ سفارش با موفقیت انجام شد --",
+                    parse_mode='Markdown'
+                )
 
-            original_caption = query.message.caption or ""
-            await query.edit_message_caption(
-                caption=f"{original_caption}\n\n-- ✅ سفارش با موفقیت انجام شد --",
-                parse_mode='Markdown'
-            )
+            elif data.startswith("admin_reject_"):
+                logger.info(f"Admin: Rejecting order {order_id}")
 
-        elif data.startswith("admin_reject_"):
-            logger.info(f"Admin: Rejecting order {order_id}")
+                await conn.execute("UPDATE orders SET status = 'rejected' WHERE order_id = ?", (order_id,))
+                await conn.commit()
+                
+                cursor = await conn.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
+                user_id_row = await cursor.fetchone()
+                if user_id_row:
+                    user_id_to_notify = user_id_row[0]
+                    await context.bot.send_message(
+                        chat_id=user_id_to_notify,
+                        text=f"❌ متاسفانه سفارش شما (شماره: **{order_id}**) رد شد.\n\n"
+                             "لطفا برای پیگیری با پشتیبانی در تماس باشید.",
+                        parse_mode='Markdown'
+                    )
 
-            c.execute("UPDATE orders SET status = 'rejected' WHERE order_id = ?", (order_id,))
-            conn.commit()
-
-            c.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
-            user_id_to_notify = c.fetchone()[0]
-
-            await context.bot.send_message(
-                chat_id=user_id_to_notify,
-                text=f"❌ متاسفانه سفارش شما (شماره: **{order_id}**) رد شد.\n\n"
-                     "لطفا برای پیگیری با پشتیبانی در تماس باشید.",
-                parse_mode='Markdown'
-            )
-
-            original_caption = query.message.caption or ""
-            await query.edit_message_caption(
-                caption=f"{original_caption}\n\n-- ❌ سفارش رد شد --",
-                parse_mode='Markdown'
-            )
+                original_caption = query.message.caption or ""
+                await query.edit_message_caption(
+                    caption=f"{original_caption}\n\n-- ❌ سفارش رد شد --",
+                    parse_mode='Markdown'
+                )
 
     except Exception as e:
         logger.error(f"Error processing admin action for order {order_id}: {e}")
         await query.message.reply_text(f"خطا در پردازش سفارش {order_id}: {e}")
-    finally:
-        conn.close()
 
 async def new_discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID:
@@ -651,11 +647,9 @@ async def get_discount_percent_admin(update: Update, context: ContextTypes.DEFAU
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("INSERT INTO discount_codes (code, discount_percent) VALUES (?, ?)", (code, percent))
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await conn.execute("INSERT INTO discount_codes (code, discount_percent) VALUES (?, ?)", (code, percent))
+            await conn.commit()
         await update.message.reply_text(f"✅ کد تخفیف `{code}` با **{percent}%** تخفیف با موفقیت ساخته شد.",
                                       reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
     except Exception as e:
@@ -664,7 +658,7 @@ async def get_discount_percent_admin(update: Update, context: ContextTypes.DEFAU
 
     return ConversationHandler.END
 
-# === Register handlers into global application ===
+# Register handlers into global application
 def register_handlers(app):
     order_conv = ConversationHandler(
         entry_points=[
@@ -723,32 +717,18 @@ def register_handlers(app):
 
 register_handlers(application)
 
-# === Webhook endpoint for Telegram ===
+# Webhook endpoint for Telegram
 @flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
 async def webhook():
     try:
+        await application.initialize()
+        
         update = Update.de_json(request.get_json(force=True), application.bot)
         await application.process_update(update)
+        
+        await application.shutdown()
+        
         return "OK", 200
     except Exception as e:
         logger.exception("Error handling webhook update")
         return Response("Error", status=500)
-
-# === Index and logs pages ===
-@flask_app.route("/")
-def index():
-    return "ربات تلگرام در حال اجراست ✅", 200
-
-@flask_app.route("/logs")
-def show_logs():
-    try:
-        if os.path.exists(LOG_FILE):
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
-                content = f.read()[-20000:]
-            content = content.replace("<", "&lt;").replace(">", "&gt;")
-            return f"<pre>{content}</pre>", 200
-        else:
-            return "هنوز لاگی وجود ندارد.", 200
-    except Exception as e:
-        logger.exception("Error reading log file")
-        return Response("Error reading logs", status=500)

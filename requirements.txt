@@ -1,3 +1,7 @@
-python-telegram-bot==21.1
-Flask
+python-telegram-bot
 aiosqlite
+flask
+gspread
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

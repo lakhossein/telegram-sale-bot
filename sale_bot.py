@@ -283,7 +283,7 @@ async def go_back_to_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await show_payment_info(update, context)
     return CONFIRM_PAYMENT
 
-EMAIL_REGEX = r"^[a-zA-Z0.9_.+-]+@gmail\.com$"
+EMAIL_REGEX = r"^[a-zA-Z0-9_.+-]+@gmail\.com$"
 
 async def get_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_email = update.message.text.strip()
